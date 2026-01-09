@@ -1,0 +1,11 @@
+version: blue
+
+labels:
+  version: blue
+  deployment: blue
+
+image:
+  tag: "1.0.0"
+
+service:
+  name: java-app-blue

@@ -1,0 +1,101 @@
+replicaCount: 2
+
+image:
+  repository: acrdevsecops.azurecr.io/java-app
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  className: azure/application-gateway
+  annotations:
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/backend-protocol: "http"
+  hosts:
+    - host: java-app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+livenessProbe:
+  httpGet:
+    path: /actuator/health/liveness
+    port: 8080
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /actuator/health/readiness
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "prod"
+  - name: JAVA_OPTS
+    value: "-Xms512m -Xmx1024m -XX:+UseG1GC"
+
+configMap:
+  data:
+    application.properties: |
+      server.port=8080
+      management.endpoints.web.exposure.include=health,info,metrics,prometheus
+      management.endpoint.health.probes.enabled=true
+      management.health.livenessState.enabled=true
+      management.health.readinessState.enabled=true
+
+secrets:
+  DATABASE_URL: "jdbc:postgresql://db-server:5432/appdb"
+  DATABASE_USERNAME: "dbuser"
+  DATABASE_PASSWORD: "changeme"
+  JWT_SECRET: "changeme"
+
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+      - namespaceSelector: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  create: true
+  name: java-app-sa

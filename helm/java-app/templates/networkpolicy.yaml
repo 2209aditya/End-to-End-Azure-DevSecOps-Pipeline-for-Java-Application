@@ -1,0 +1,17 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "java-app.fullname" . }}-netpol
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "java-app.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "java-app.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- toYaml .Values.networkPolicy.policyTypes | nindent 4 }}
+  ingress:
+    {{- toYaml .Values.networkPolicy.ingress | nindent 4 }}
+{{- end }}

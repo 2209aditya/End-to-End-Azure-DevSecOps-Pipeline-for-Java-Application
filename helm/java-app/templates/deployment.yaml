@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "java-app.fullname" . }}-{{ .Values.version | default "blue" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "java-app.labels" . | nindent 4 }}
+    version: {{ .Values.version | default "blue" }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "java-app.selectorLabels" . | nindent 6 }}
+      version: {{ .Values.version | default "blue" }}
+  template:
+    metadata:
+      labels:
+        {{- include "java-app.selectorLabels" . | nindent 8 }}
+        version: {{ .Values.version | default "blue" }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      serviceAccountName: {{ include "java-app.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        {{- range .Values.env }}
+        - name: {{ .name }}
+          value: {{ .value | quote }}
+        {{- end }}
+        envFrom:
+        - configMapRef:
+            name: {{ include "java-app.fullname" . }}-config
+        - secretRef:
+            name: {{ include "java-app.fullname" . }}-secret
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        livenessProbe:
+          {{- toYaml .Values.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.readinessProbe | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /app/cache
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}

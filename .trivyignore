@@ -1,0 +1,3 @@
+# Ignore specific vulnerabilities with justification
+CVE-2023-12345  # False positive - not applicable to our use case
+CVE-2023-67890  # Will be fixed in next dependency update

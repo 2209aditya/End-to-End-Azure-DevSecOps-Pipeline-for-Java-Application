@@ -1,0 +1,13 @@
+apiVersion: v2
+name: java-app
+description: Java Spring Boot Application Helm Chart
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - java
+  - spring-boot
+  - microservices
+maintainers:
+  - name: DevSecOps Team
+    email: devsecops@company.com

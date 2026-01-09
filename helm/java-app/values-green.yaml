@@ -1,0 +1,11 @@
+version: green
+
+labels:
+  version: green
+  deployment: green
+
+image:
+  tag: "2.0.0"
+
+service:
+  name: java-app-green

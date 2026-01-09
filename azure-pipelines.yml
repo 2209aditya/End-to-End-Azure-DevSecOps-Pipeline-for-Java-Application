@@ -1,0 +1,451 @@
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+variables:
+  azureSubscription: 'Azure-ServiceConnection'
+  acrName: 'acrdevsecops'
+  acrLoginServer: 'acrdevsecops.azurecr.io'
+  imageRepository: 'java-app'
+  dockerfilePath: 'Dockerfile'
+  tag: '$(Build.BuildId)'
+  k8sNamespace: 'prod'
+  helmChartPath: 'helm/java-app'
+  gitopsRepo: 'https://github.com/YOUR_USERNAME/k8s-gitops.git'
+  
+  # SonarQube
+  sonarQubeServiceConnection: 'SonarQube-Connection'
+  
+  # Deployment Strategy
+  deploymentColor: 'blue'  # Change to 'green' for next deployment
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+stages:
+#############################################
+# STAGE 1: BUILD & UNIT TEST
+#############################################
+- stage: Build
+  displayName: 'Build & Unit Test'
+  jobs:
+  - job: BuildJob
+    displayName: 'Maven Build and Test'
+    steps:
+    - task: Maven@3
+      displayName: 'Maven Build'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean package'
+        options: '-DskipTests=false'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+        mavenVersionOption: 'Default'
+        codeCoverageToolOption: 'JaCoCo'
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish Code Coverage'
+      inputs:
+        codeCoverageTool: 'JaCoCo'
+        summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/site/jacoco/jacoco.xml'
+        reportDirectory: '$(System.DefaultWorkingDirectory)/**/site/jacoco'
+    
+    - task: CopyFiles@2
+      displayName: 'Copy JAR to Staging'
+      inputs:
+        sourceFolder: '$(System.DefaultWorkingDirectory)/target'
+        contents: '*.jar'
+        targetFolder: '$(Build.ArtifactStagingDirectory)'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Build Artifacts'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: 'drop'
+
+#############################################
+# STAGE 2: CODE QUALITY - SONARQUBE
+#############################################
+- stage: CodeQuality
+  displayName: 'Code Quality Analysis'
+  dependsOn: Build
+  jobs:
+  - job: SonarQubeJob
+    displayName: 'SonarQube Analysis'
+    steps:
+    - task: Maven@3
+      displayName: 'Maven Build for SonarQube'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean verify'
+        options: '-DskipTests=false'
+    
+    - task: SonarQubePrepare@5
+      displayName: 'Prepare SonarQube Analysis'
+      inputs:
+        SonarQube: '$(sonarQubeServiceConnection)'
+        scannerMode: 'Other'
+        extraProperties: |
+          sonar.projectKey=java-devsecops-app
+          sonar.projectName=Java DevSecOps Application
+          sonar.sources=src/main/java
+          sonar.tests=src/test/java
+          sonar.java.binaries=target/classes
+          sonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+    
+    - task: SonarQubeAnalyze@5
+      displayName: 'Run SonarQube Analysis'
+    
+    - task: SonarQubePublish@5
+      displayName: 'Publish SonarQube Results'
+      inputs:
+        pollingTimeoutSec: '300'
+    
+    - task: sonarcloud-buildbreaker@2
+      displayName: 'Break Build on Quality Gate Failure'
+      inputs:
+        SonarCloud: '$(sonarQubeServiceConnection)'
+
+#############################################
+# STAGE 3: SECURITY SCANNING
+#############################################
+- stage: SecurityScanning
+  displayName: 'Security Scanning'
+  dependsOn: CodeQuality
+  jobs:
+  
+  # OWASP Dependency Check
+  - job: OWASPDependencyCheck
+    displayName: 'OWASP Dependency Check'
+    steps:
+    - task: Maven@3
+      displayName: 'OWASP Dependency Check'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'dependency-check:check'
+        options: '-DfailBuildOnCVSS=7'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish OWASP Report'
+      condition: always()
+      inputs:
+        pathToPublish: '$(System.DefaultWorkingDirectory)/target/dependency-check-report.html'
+        artifactName: 'owasp-report'
+  
+  # Snyk Security Scan
+  - job: SnykScan
+    displayName: 'Snyk Security Scan'
+    steps:
+    - task: SnykSecurityScan@1
+      displayName: 'Snyk Code & Dependencies'
+      inputs:
+        serviceConnectionEndpoint: 'Snyk-Connection'
+        testType: 'app'
+        monitorWhen: 'always'
+        failOnIssues: true
+        projectName: 'java-devsecops-app'
+        organization: 'your-org'
+
+#############################################
+# STAGE 4: DOCKER BUILD & SCAN
+#############################################
+- stage: DockerBuildAndScan
+  displayName: 'Docker Build & Security Scan'
+  dependsOn: SecurityScanning
+  jobs:
+  - job: DockerJob
+    displayName: 'Build, Scan & Push Docker Image'
+    steps:
+    - task: Docker@2
+      displayName: 'Build Docker Image'
+      inputs:
+        command: 'build'
+        repository: '$(imageRepository)'
+        dockerfile: '$(dockerfilePath)'
+        tags: |
+          $(tag)
+          latest
+        arguments: '--no-cache'
+    
+    # Trivy Filesystem Scan
+    - task: Bash@3
+      displayName: 'Install Trivy'
+      inputs:
+        targetType: 'inline'
+        script: |
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install trivy -y
+    
+    - task: Bash@3
+      displayName: 'Trivy Image Scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          trivy image --exit-code 0 --severity LOW,MEDIUM --format table $(imageRepository):$(tag)
+          trivy image --exit-code 1 --severity HIGH,CRITICAL --format table $(imageRepository):$(tag)
+          trivy image --format json --output trivy-report.json $(imageRepository):$(tag)
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Trivy Report'
+      condition: always()
+      inputs:
+        pathToPublish: 'trivy-report.json'
+        artifactName: 'trivy-report'
+    
+    # Azure Container Registry Login
+    - task: Docker@2
+      displayName: 'Login to ACR'
+      inputs:
+        command: 'login'
+        containerRegistry: '$(azureSubscription)'
+    
+    # Tag and Push to ACR
+    - task: Docker@2
+      displayName: 'Tag Image for ACR'
+      inputs:
+        command: 'tag'
+        arguments: '$(imageRepository):$(tag) $(acrLoginServer)/$(imageRepository):$(tag)'
+    
+    - task: Docker@2
+      displayName: 'Push to ACR'
+      inputs:
+        command: 'push'
+        repository: '$(acrLoginServer)/$(imageRepository)'
+        tags: |
+          $(tag)
+          latest
+    
+    # Scan image in ACR with Trivy
+    - task: Bash@3
+      displayName: 'Trivy ACR Image Scan'
+      inputs:
+        targetType: 'inline'
+        script: |
+          trivy image --severity HIGH,CRITICAL \
+            $(acrLoginServer)/$(imageRepository):$(tag)
+
+#############################################
+# STAGE 5: HELM PACKAGE & UPDATE GITOPS
+#############################################
+- stage: HelmAndGitOps
+  displayName: 'Helm Package & GitOps Update'
+  dependsOn: DockerBuildAndScan
+  jobs:
+  - job: HelmJob
+    displayName: 'Package Helm & Update GitOps Repo'
+    steps:
+    - task: HelmInstaller@1
+      displayName: 'Install Helm'
+      inputs:
+        helmVersionToInstall: 'latest'
+    
+    - task: Bash@3
+      displayName: 'Update Helm Values with New Image'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Update image tag in values file
+          sed -i "s|tag: .*|tag: $(tag)|g" $(helmChartPath)/values-$(deploymentColor).yaml
+          sed -i "s|repository: .*|repository: $(acrLoginServer)/$(imageRepository)|g" $(helmChartPath)/values-$(deploymentColor).yaml
+    
+    - task: HelmDeploy@0
+      displayName: 'Helm Lint'
+      inputs:
+        command: 'lint'
+        arguments: '$(helmChartPath)'
+    
+    - task: HelmDeploy@0
+      displayName: 'Helm Package'
+      inputs:
+        command: 'package'
+        chartPath: '$(helmChartPath)'
+        destination: '$(Build.ArtifactStagingDirectory)/helm'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Helm Chart'
+      inputs:
+        pathToPublish: '$(Build.ArtifactStagingDirectory)/helm'
+        artifactName: 'helm-chart'
+    
+    # Update GitOps Repository
+    - task: Bash@3
+      displayName: 'Update GitOps Repository'
+      inputs:
+        targetType: 'inline'
+        script: |
+          git config --global user.email "pipeline@azure.com"
+          git config --global user.name "Azure Pipeline"
+          
+          # Clone GitOps repo
+          git clone $(gitopsRepo) gitops-repo
+          cd gitops-repo
+          
+          # Update values file for deployment color
+          cp ../$(helmChartPath)/values-$(deploymentColor).yaml k8s-gitops/prod/$(deploymentColor)/values.yaml
+          
+          # Commit and push
+          git add .
+          git commit -m "Update $(deploymentColor) deployment to version $(tag)"
+          git push origin main
+      env:
+        GIT_TOKEN: $(System.AccessToken)
+
+#############################################
+# STAGE 6: DEPLOY TO AKS (via Argo CD Sync)
+#############################################
+- stage: Deploy
+  displayName: 'Deploy to AKS'
+  dependsOn: HelmAndGitOps
+  jobs:
+  - deployment: DeployToAKS
+    displayName: 'Trigger Argo CD Sync'
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: KubectlInstaller@0
+            displayName: 'Install kubectl'
+          
+          - task: Kubernetes@1
+            displayName: 'kubectl login'
+            inputs:
+              connectionType: 'Azure Resource Manager'
+              azureSubscriptionEndpoint: '$(azureSubscription)'
+              azureResourceGroup: 'rg-devsecops-prod'
+              kubernetesCluster: 'aks-devsecops-prod'
+              command: 'login'
+          
+          - task: Bash@3
+            displayName: 'Install Argo CD CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+                chmod +x /usr/local/bin/argocd
+          
+          - task: Bash@3
+            displayName: 'Argo CD Sync Application'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Get Argo CD admin password
+                ARGOCD_PASSWORD=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+                
+                # Login to Argo CD
+                argocd login localhost:8080 --username admin --password $ARGOCD_PASSWORD --insecure
+                
+                # Sync application
+                argocd app sync java-app-$(deploymentColor) --prune
+                
+                # Wait for sync to complete
+                argocd app wait java-app-$(deploymentColor) --health
+
+#############################################
+# STAGE 7: SMOKE TESTS & VALIDATION
+#############################################
+- stage: SmokeTests
+  displayName: 'Smoke Tests & Validation'
+  dependsOn: Deploy
+  jobs:
+  - job: SmokeTestJob
+    displayName: 'Run Smoke Tests'
+    steps:
+    - task: Bash@3
+      displayName: 'Health Check'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Get service endpoint
+          SERVICE_IP=$(kubectl get svc java-app-$(deploymentColor) -n prod -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          
+          # Health check
+          curl -f http://$SERVICE_IP/actuator/health || exit 1
+          
+          # Basic functionality test
+          curl -f http://$SERVICE_IP/api/test || exit 1
+    
+    - task: Bash@3
+      displayName: 'Performance Test'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Install Apache Bench
+          sudo apt-get install apache2-utils -y
+          
+          SERVICE_IP=$(kubectl get svc java-app-$(deploymentColor) -n prod -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          
+          # Run performance test (100 requests, 10 concurrent)
+          ab -n 100 -c 10 http://$SERVICE_IP/api/test
+
+#############################################
+# STAGE 8: SWITCH TRAFFIC (Blue-Green)
+#############################################
+- stage: SwitchTraffic
+  displayName: 'Switch Traffic to New Version'
+  dependsOn: SmokeTests
+  condition: succeeded()
+  jobs:
+  - deployment: SwitchTrafficJob
+    displayName: 'Update Service Selector'
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: Bash@3
+            displayName: 'Switch Traffic'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Update service selector to point to new color
+                kubectl patch service java-app-service -n prod -p '{"spec":{"selector":{"version":"$(deploymentColor)"}}}'
+                
+                echo "Traffic switched to $(deploymentColor) deployment"
+          
+          - task: Bash@3
+            displayName: 'Verify Traffic Switch'
+            inputs:
+              targetType: 'inline'
+              script: |
+                sleep 10
+                SERVICE_IP=$(kubectl get svc java-app-service -n prod -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+                curl -f http://$SERVICE_IP/actuator/info | grep $(tag)
+
+#############################################
+# STAGE 9: CLEANUP OLD DEPLOYMENT
+#############################################
+- stage: Cleanup
+  displayName: 'Cleanup Old Deployment'
+  dependsOn: SwitchTraffic
+  condition: succeeded()
+  jobs:
+  - job: CleanupJob
+    displayName: 'Scale Down Old Deployment'
+    steps:
+    - task: Bash@3
+      displayName: 'Scale Down Old Color'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # Determine old color
+          if [ "$(deploymentColor)" == "blue" ]; then
+            OLD_COLOR="green"
+          else
+            OLD_COLOR="blue"
+          fi
+          
+          # Scale down old deployment
+          kubectl scale deployment java-app-$OLD_COLOR -n prod --replicas=0
+          
+          echo "Scaled down $OLD_COLOR deployment"

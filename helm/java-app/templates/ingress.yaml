@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "java-app.fullname" . }}-{{ .Values.version | default "blue" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "java-app.labels" . | nindent 4 }}
+    version: {{ .Values.version | default "blue" }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+  - port: {{ .Values.service.port }}
+    targetPort: {{ .Values.service.targetPort }}
+    protocol: TCP
+    name: http
+  selector:
+    {{- include "java-app.selectorLabels" . | nindent 4 }}
+    version: {{ .Values.version | default "blue" }}
+---
+# Main service for traffic switching
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "java-app.fullname" . }}-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "java-app.labels" . | nindent 4 }}
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    {{- include "java-app.selectorLabels" . | nindent 4 }}
+    version: blue  # Change this to switch traffic
